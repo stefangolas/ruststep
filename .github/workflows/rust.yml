@@ -15,7 +15,7 @@ jobs:
           - stable
           - ${{ env.MSRV }}
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
     - uses: actions-rs/toolchain@v1
       with:
         profile: minimal
@@ -32,7 +32,7 @@ jobs:
   check-format:
     runs-on: ${{ env.UBUNTU_VERSION }}
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: ${{ env.MSRV }}
@@ -48,7 +48,7 @@ jobs:
   doc:
     runs-on: ${{ env.UBUNTU_VERSION }}
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: ${{ env.MSRV }}
@@ -63,7 +63,7 @@ jobs:
   clippy:
     runs-on: ${{ env.UBUNTU_VERSION }}
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
     - uses: actions-rs/toolchain@v1
       with:
         toolchain: ${{ env.MSRV }}
