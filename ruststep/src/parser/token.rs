@@ -9,8 +9,8 @@ use nom::combinator::map;
 use nom::{
     branch::alt,
     character::complete::{char, digit0, digit1, multispace0, none_of, satisfy},
-    combinator::opt,
-    multi::{many0, many1},
+    combinator::{opt, recognize},
+    multi::{many0, many0_count, many1},
     sequence::tuple,
     Parser,
 };
@@ -48,21 +48,32 @@ fn exponent(input: &str) -> ParseResult<i64> {
 
 /// real = \[ [sign] \] [digit] { [digit] } `.` { [digit] } \[ `E` \[ [sign] \] [digit] { [digit] } \] .
 pub fn real(input: &str) -> ParseResult<f64> {
+    // A geometry-heavy STEP file is mostly reals, so this is one of the
+    // hottest paths in the parser. Recognize the numeric span and hand the
+    // original slice to the standard float parser rather than rebuilding the
+    // literal into a fresh String and parsing that. The grammar is unchanged;
+    // only the allocation goes away.
     tuple((
         opt(sign),
         multispace0,
-        digit1,
-        char('.'),
-        digit0,
+        recognize(tuple((digit1, char('.'), digit0))),
         opt(exponent),
     ))
-    .map(|(sign, _space, integral, _point, fractional, exp)| {
-        let num: f64 = format!("{}.{}e{}", integral, fractional, exp.unwrap_or(0))
-            .parse()
-            .expect("Failed to parse Float");
+    .map(|(sign, _space, mantissa, exp): (_, _, &str, _)| {
+        // The mantissa slice is already valid Rust float syntax, so the common
+        // case parses straight from the input with no allocation. An exponent
+        // is kept on the old path because this grammar tolerates spaces inside
+        // it, which `f64::from_str` would reject, and because rescaling by a
+        // power of ten afterwards would not round identically.
+        let magnitude: f64 = match exp {
+            None => mantissa.parse().expect("recognized real should parse"),
+            Some(exp) => format!("{mantissa}e{exp}")
+                .parse()
+                .expect("recognized real should parse"),
+        };
         match sign {
-            Some('-') => -num,
-            _ => num,
+            Some('-') => -magnitude,
+            _ => magnitude,
         }
     })
     .parse(input)
@@ -197,11 +208,11 @@ pub fn keyword(input: &str) -> ParseResult<String> {
 
 /// standard_keyword = [upper] { [upper] | [digit] } .
 pub fn standard_keyword(input: &str) -> ParseResult<String> {
-    tuple((upper, many0(alt((upper, digit)))))
-        .map(|(first, tail)| {
-            let head = &[first];
-            head.iter().chain(tail.iter()).collect()
-        })
+    // Every entity instance in the file names its type here. Recognizing the
+    // span copies the name once, instead of collecting a `Vec<char>` and then
+    // building a `String` from it.
+    recognize(tuple((upper, many0_count(alt((upper, digit))))))
+        .map(str::to_owned)
         .parse(input)
 }
 
@@ -306,5 +317,77 @@ mod tests {
         let (res, s) = super::value_instance_name("@001").finish().unwrap();
         assert_eq!(res, "");
         assert_eq!(s, 1);
+    }
+
+    // The real and keyword parsers were rewritten to avoid rebuilding their
+    // input into a fresh String on every token. These pin the behaviour that
+    // rewrite has to preserve.
+
+    #[test]
+    fn real_without_exponent() {
+        let (res, v) = super::real("1.5").finish().unwrap();
+        assert_eq!(res, "");
+        assert_eq!(v, 1.5);
+
+        // A real may have no fractional digits at all.
+        let (res, v) = super::real("42.").finish().unwrap();
+        assert_eq!(res, "");
+        assert_eq!(v, 42.0);
+    }
+
+    #[test]
+    fn real_sign_is_applied() {
+        assert_eq!(super::real("-0.25").finish().unwrap().1, -0.25);
+        assert_eq!(super::real("+0.25").finish().unwrap().1, 0.25);
+    }
+
+    #[test]
+    fn real_with_exponent() {
+        assert_eq!(super::real("1.5E3").finish().unwrap().1, 1500.0);
+        assert_eq!(super::real("1.5E-3").finish().unwrap().1, 0.0015);
+        assert_eq!(super::real("-2.E2").finish().unwrap().1, -200.0);
+    }
+
+    /// This grammar tolerates spaces inside an exponent, which the standard
+    /// library float parser does not, so the two cannot share a code path.
+    #[test]
+    fn real_with_spaced_exponent() {
+        assert_eq!(super::real("1.5E - 3").finish().unwrap().1, 0.0015);
+        assert_eq!(super::real("1.5E + 3").finish().unwrap().1, 1500.0);
+    }
+
+    /// Parsing must round exactly as parsing the whole literal would, rather
+    /// than rescaling the mantissa by a power of ten afterwards.
+    #[test]
+    fn real_rounds_like_the_whole_literal() {
+        let parsed = super::real("1.7976931348623157E308").finish().unwrap().1;
+        assert_eq!(parsed, 1.7976931348623157e308_f64);
+        let parsed = super::real("4.9E-324").finish().unwrap().1;
+        assert_eq!(parsed, 4.9e-324_f64);
+    }
+
+    #[test]
+    fn real_stops_at_the_end_of_the_number() {
+        let (res, v) = super::real("1.5,2.5").finish().unwrap();
+        assert_eq!(res, ",2.5");
+        assert_eq!(v, 1.5);
+    }
+
+    #[test]
+    fn standard_keyword_reads_digits_and_uppercase() {
+        // `upper` includes `_` in this grammar, so an entity name is a single
+        // keyword token.
+        let (res, k) = super::standard_keyword("CARTESIAN_POINT(").finish().unwrap();
+        assert_eq!(res, "(");
+        assert_eq!(k, "CARTESIAN_POINT");
+
+        let (res, k) = super::standard_keyword("B2(").finish().unwrap();
+        assert_eq!(res, "(");
+        assert_eq!(k, "B2");
+    }
+
+    #[test]
+    fn standard_keyword_requires_a_leading_upper() {
+        assert!(super::standard_keyword("2B").finish().is_err());
     }
 }
